@@ -2,24 +2,39 @@ import hashlib
 import os
 import random as rnd
 import re
+import requests
 import sqlite3
+import string
 import sys
 
 from bs4 import BeautifulSoup
 
 import queries
 
-def cleanup_wikipedia_data(src_path, dest_path):
+def cleanup_wikipedia_data(src_path, dest_path, force_overwrite=False):
+    """
+    Reads the raw wikipedia page content from the source file, cleans it up, 
+    and writes the result to the destination file. If force overwrite is 
+    enabled the procedure will be done regardless if the destination file 
+    already exists or not.
+    """
     # Check types.
     assert isinstance(src_path, str), "Source path must be a string."
     assert isinstance(dest_path, str), "Destination path must be a string."
+    
+    # Check if the destination file already exists.
+    if os.path.isfile(dest_path):
+        if not force_overwrite:
+            print(f"Destination file already exists '{dest_path}', cleanup " \
+                "has been skipped.")
+            return
     
     # Read data from source file.
     try:
         with open(src_path, "rb") as file:
             content = file.read()
     except Exception as e:
-        print(f"An error occured while trying to read the source file: {e}")
+        print(f"An error occured while trying to read the source file: '{e}'")
         return
     
     # Create soup object and find a paragraph tags.
@@ -62,6 +77,10 @@ def cleanup_wikipedia_data(src_path, dest_path):
     file.close()
 
 def create_new_database(database_name):
+    """
+    Creates a new database in the res/ folder with the extension .dat. The 
+    database will contain two tables: 'markov_data' and 'dataset_hashes'.
+    """
     # Check types.
     assert isinstance(database_name, str), "Database name must be a string."
     
@@ -84,7 +103,7 @@ def create_new_database(database_name):
     try:
         conn = sqlite3.connect(db_path)
     except Exception as e:
-        print(f"An error occured while trying to connect to the database: {e}")
+        print(f"An error occured while trying to connect to the database: '{e}'")
         return
     
     # Create database cursor.
@@ -103,6 +122,10 @@ def create_new_database(database_name):
 def handle_line(line, markov_chain_length):
     # Combos list will store all combos for this line.
     combos = []
+    
+    # Skip lines that contain non-printable characters.
+    if False in [x in string.printable for x in line]:
+        return combos
     
     # Loop over all character indices in the line.
     for char_index in range(len(line)):
@@ -145,7 +168,7 @@ def train_database_on_dataset(database_name, dataset_path, markov_chain_length):
     try:
         conn = sqlite3.connect(db_path)
     except Exception as e:
-        print(f"An error occured while trying to connect to the database: {e}")
+        print(f"An error occured while trying to connect to the database: '{e}'")
         return
     
     # Get dataset path.
@@ -159,7 +182,7 @@ def train_database_on_dataset(database_name, dataset_path, markov_chain_length):
         dataset_hash = hashlib.sha256(dataset_content.encode("utf-8")).hexdigest()
         file.close()
     except Exception as e:
-        print(f"An error occured: {e}")
+        print(f"An error occured: '{e}'")
         return
     
     # Create database cursor.
@@ -229,7 +252,7 @@ def generate_sentence(database_name, sentence_start, max_length, \
     try:
         conn = sqlite3.connect(db_path)
     except Exception as e:
-        print(f"An error occured while trying to connect to the database: {e}")
+        print(f"An error occured while trying to connect to the database: '{e}'")
         return
     
     # Create database cursor.
@@ -297,7 +320,7 @@ def test_program():
     try:
         conn = sqlite3.connect(db_path)
     except Exception as e:
-        print(f"TEST: An error occured while trying to connect to the database: {e}")
+        print(f"TEST: An error occured while trying to connect to the database: '{e}'")
         return
     c = conn.cursor()
     
@@ -320,7 +343,7 @@ def test_program():
     try:
         conn = sqlite3.connect(db_path)
     except Exception as e:
-        print(f"TEST: An error occured while trying to connect to the database: {e}")
+        print(f"TEST: An error occured while trying to connect to the database: '{e}'")
         return
     c = conn.cursor()
     
@@ -342,25 +365,70 @@ def test_program():
     # Print success message if all tests passed.
     print("TEST SUCCESS!")
 
+def get_wikipedia_page(page_title):
+    # Check types.
+    assert isinstance(page_title, str), "Page title must be a string."
+    
+    # Replace spaces with underscores.
+    if " " in page_title:
+        page_title = page_title.replace(" ", "_")
+        print("Warning: Page title cannot contain spaces. Spaces have " \
+            "been replaced by underscores, the used page title is " \
+            f"'{page_title}'")
+    
+    # Check if the page has already been requested and saved.
+    filename = f"wikipedia_{page_title.lower()}.txt"
+    path = os.path.join(os.getcwd(), "res", filename)
+    if os.path.isfile(path):
+        print(f"Wikipedia page with title '{page_title}' has already been saved.")
+        return
+    
+    # Get page using api.
+    url = f"https://en.wikipedia.org/api/rest_v1/page/html/{page_title}"
+    response = requests.get(url)
+    
+    # Check response code.
+    if not response.ok:
+        print("An error occured while getting the page contents.")
+        print(f"Status code {response.status_code}: {response.reason}")
+        return
+    
+    # Write response content to file.
+    with open(path, "wb") as file:
+        file.write(response.content)
+    
+    # Print success message.
+    print(f"Wikipedia page with title '{page_title}'' has been saved to " \
+        f"'{path}'.")
+
 def main():
-    # Set database name.
+    # Set database name and markov chain length.
     db_name = "banana"
+    markov_chain_length = 8
     
     # Clean up wikipedia articles about cats and dogs.
     cleanup_wikipedia_data("res/wikipedia_cat.txt", "res/wikipedia_cat_clean.txt")
     cleanup_wikipedia_data("res/wikipedia_dog.txt", "res/wikipedia_dog_clean.txt")
+    cleanup_wikipedia_data("res/wikipedia_fish.txt", "res/wikipedia_fish_clean.txt")
+    cleanup_wikipedia_data("res/wikipedia_mammal.txt", "res/wikipedia_mammal_clean.txt")
+    cleanup_wikipedia_data("res/wikipedia_reptile.txt", "res/wikipedia_reptile_clean.txt")
+    cleanup_wikipedia_data("res/wikipedia_dinosaur.txt", "res/wikipedia_dinosaur_clean.txt")
     
     # Create new database, skips if the database already exists.
     create_new_database(db_name)
     
     # Train database on datasets, skips if the database is already trained on 
     # these datasets.
-    train_database_on_dataset(db_name, "res/wikipedia_cat_clean.txt", 5)
-    train_database_on_dataset(db_name, "res/wikipedia_dog_clean.txt", 5)
+    train_database_on_dataset(db_name, "res/wikipedia_cat_clean.txt", markov_chain_length)
+    train_database_on_dataset(db_name, "res/wikipedia_dog_clean.txt", markov_chain_length)
+    train_database_on_dataset(db_name, "res/wikipedia_fish_clean.txt", markov_chain_length)
+    train_database_on_dataset(db_name, "res/wikipedia_mammal_clean.txt", markov_chain_length)
+    train_database_on_dataset(db_name, "res/wikipedia_reptile_clean.txt", markov_chain_length)
+    train_database_on_dataset(db_name, "res/wikipedia_dinosaur_clean.txt", markov_chain_length)
     
     # Print 5 random sentences.
-    for index, string in enumerate(["The d", "The c", "felin", "dogs ", "histo"]):
-        sentence = generate_sentence(db_name, string, 250, 5)
+    for index, string in enumerate(["The dogs", "cats wer", "the morn", "Dinosaur", "History "]):
+        sentence = generate_sentence(db_name, string, 250, markov_chain_length)
         print(index, sentence)
 
 if __name__ == "__main__":
