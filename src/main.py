@@ -10,6 +10,10 @@ from bs4 import BeautifulSoup
 import queries
 
 def cleanup_wikipedia_data(src_path, dest_path):
+    # Check types.
+    assert isinstance(src_path, str), "Source path must be a string."
+    assert isinstance(dest_path, str), "Destination path must be a string."
+    
     # Read data from source file.
     try:
         with open(src_path, "rb") as file:
@@ -58,6 +62,9 @@ def cleanup_wikipedia_data(src_path, dest_path):
     file.close()
 
 def create_new_database(database_name):
+    # Check types.
+    assert isinstance(database_name, str), "Database name must be a string."
+    
     # Get res/ directory.
     res_folder = os.path.join(os.getcwd(), "res")
     
@@ -93,12 +100,46 @@ def create_new_database(database_name):
     # Close connection.
     conn.close()
 
+def handle_line(line, markov_chain_length):
+    # Combos list will store all combos for this line.
+    combos = []
+    
+    # Loop over all character indices in the line.
+    for char_index in range(len(line)):
+        # Skip the first few entries where there are less characters 
+        # available for prev_tokens than the markov chain length.
+        if char_index < markov_chain_length:
+            continue
+        
+        # Get prev_tokens and next_token from line.
+        prev_tokens = line[char_index - markov_chain_length:char_index]
+        next_token = line[char_index]
+        
+        # Add new combo to list if it does not exist, else update the entry 
+        # in the list with the new frequency.
+        match_found = False
+        for i, (p, n, f) in enumerate(combos):
+            if p == prev_tokens and n == next_token:
+                combos[i] = (p, n, f + 1)
+                match_found = True
+                break
+        if not match_found:
+            combos.append((prev_tokens, next_token, 1))
+    
+    # Return combos for this line.
+    return combos
+
 def train_database_on_dataset(database_name, dataset_path, markov_chain_length):
-    # Get res/ directory.
-    res_folder = os.path.join(os.getcwd(), "res")
+    # Check types.
+    assert isinstance(database_name, str), "Database name must be a string."
+    assert isinstance(dataset_path, str), "Dataset path must be a string."
+    assert isinstance(markov_chain_length, int), "Markov chain length must " \
+        "be a positive integer."
+    assert markov_chain_length > 0, "Markov chain length must " \
+        "be a positive integer."
     
     # Get database path.
-    db_path = os.path.join(res_folder, f"{database_name}.dat")
+    db_path = os.path.join(os.getcwd(), "res", f"{database_name}.dat")
     
     # Create connection.
     try:
@@ -134,65 +175,27 @@ def train_database_on_dataset(database_name, dataset_path, markov_chain_length):
     # Insert hash into database.
     c.execute(queries.insert_hash, (dataset_hash,))
     
+    # Initialize master list. This list will contain all markov combo data 
+    # for this file.
+    master_list = []
+    
     # Loop over all lines in the dataset.
     for index, line in enumerate(str(dataset_content).split("\n")):
         # Print message showing the progress so far.
-        print(f"Importing line {index}...\r", end="")
+        print(f"Importing line {index} ({len(master_list)} entries so far)...\r", end="")
         sys.stdout.flush()
         
-        # Collect to be added/updated entries in a list.
-        to_add = []
-        to_update = []
+        # Get (prev_tokens, next_token, frequency) combos from line and add 
+        # them to the master list.
+        combos = handle_line(line, markov_chain_length)
+        master_list.extend(combos)
         
-        # Loop over all character indices in the line.
-        for char_index in range(len(line)):
-            # Skip the first few entries where there are less characters 
-            # available for prev_tokens than the markov chain length.
-            if char_index < markov_chain_length:
-                continue
-            
-            # Get prev_tokens and next_token from line.
-            prev_tokens = line[char_index - markov_chain_length:char_index]
-            next_token = line[char_index]
-            
-            # Check if this combination of prev_tokens and next_token already 
-            # exists.
-            result = c.execute(queries.check_token_combo_frequency, \
-                (prev_tokens, next_token))
-            
-            # Insert the combo if it does not exist, increment if it does.
-            result_freq = result.fetchone()
-            if result_freq is None:
-                # Check if this entry has already been added to the list.
-                match_found = False
-                for i, (p, n, f) in enumerate(to_add):
-                    # Increment the frequency if it already exists.
-                    if p == prev_tokens and n == next_token:
-                        to_add[i] = (p, n, f + 1)
-                        match_found = True
-                        break
-                # If no match was found, add a new entry.
-                if not match_found:
-                    to_add.append((prev_tokens, next_token, 1))
-            else:
-                # Check if this entry has already been added to the list.
-                match_found = False
-                for i, (f, p, n) in enumerate(to_update):
-                    # Increment the frequency if it already exists.
-                    if p == prev_tokens and n == next_token:
-                        to_update[i] = (f + 1, p, n)
-                        match_found = True
-                        break
-                # If no match was found, add a new entry.
-                if not match_found:
-                    to_update.append((result_freq[0] + 1, prev_tokens, next_token))
-        
-        # Execute add and update queries for the whole lists at once.
-        c.executemany(queries.insert_token_combo_frequency, to_add)
-        c.executemany(queries.update_token_combo_frequency, to_update)
+    # Execute query for the whole master list at once.
+    print("\nExecuting queries...")
+    c.executemany(queries.insert_combo, master_list)
     
     # Print done message.
-    print("\nDone!")
+    print("Done!")
     
     # Commit changes.
     conn.commit()
@@ -200,17 +203,27 @@ def train_database_on_dataset(database_name, dataset_path, markov_chain_length):
     # Close connection.
     conn.close()
 
-def generate_sentence(database_name, sentence_start, max_length, markov_chain_length):
+def generate_sentence(database_name, sentence_start, max_length, \
+    markov_chain_length):
+    # Check types.
+    assert isinstance(database_name, str), "Database name must be a string."
+    assert isinstance(sentence_start, str), "Sentence start must be a string."
+    assert len(sentence_start) >= markov_chain_length, "Sentence start " \
+        "must have a length equal to or greater than the markov chain length."
+    assert isinstance(max_length, int), "Max length must be a positive integer."
+    assert max_length > 0, "Max length must be a positive integer."
+    assert isinstance(markov_chain_length, int), "Markov chain length must " \
+        "be a positive integer."
+    assert markov_chain_length > 0, "Markov chain length must " \
+        "be a positive integer."
+    
     # Check if the sentence start is at least as long as the markov chain.
     if len(sentence_start) < markov_chain_length:
         print("Sentence start is too short.")
         return
     
-    # Get res/ directory.
-    res_folder = os.path.join(os.getcwd(), "res")
-    
     # Get database path.
-    db_path = os.path.join(res_folder, f"{database_name}.dat")
+    db_path = os.path.join(os.getcwd(), "res", f"{database_name}.dat")
     
     # Create connection.
     try:
@@ -263,22 +276,91 @@ def generate_sentence(database_name, sentence_start, max_length, markov_chain_le
     # Return the sentence.
     return sentence
 
+def test_program():
+    # Clean up wikipedia articles about cats and dogs.
+    cleanup_wikipedia_data("res/wikipedia_cat.txt", "res/wikipedia_cat_clean.txt")
+    cleanup_wikipedia_data("res/wikipedia_dog.txt", "res/wikipedia_dog_clean.txt")
+    
+    # Set database name.
+    db_name = "test_db"
+    
+    # Get database path.
+    db_path = os.path.join(os.getcwd(), "res", f"{db_name}.dat")
+    
+    # Create new database.
+    create_new_database(db_name)
+    
+    # Train database on cat dataset.
+    train_database_on_dataset(db_name, "res/wikipedia_cat_clean.txt", 5)
+    
+    # Open connection and create cursor.
+    try:
+        conn = sqlite3.connect(db_path)
+    except Exception as e:
+        print(f"TEST: An error occured while trying to connect to the database: {e}")
+        return
+    c = conn.cursor()
+    
+    # Test if top 10 result is still the same after training on cats.
+    expected_result = [(' cats', ' ', 124), (' with', ' ', 69), \
+        (' of t', 'h', 68), ('of th', 'e', 63), (' that', ' ', 63), \
+        ('omest', 'i', 62), ('mesti', 'c', 62), ('n the', ' ', 62), \
+        ('s are', ' ', 59), (' thei', 'r', 58)]
+    test_result = c.execute(queries.select_markov_data_table_limit10)
+    assert expected_result == test_result.fetchall(), "TEST FAILED: " \
+        "Incorrect result after training on cats."
+    
+    # Close connection.
+    conn.close()
+    
+    # Train database on dog dataset.
+    train_database_on_dataset(db_name, "res/wikipedia_dog_clean.txt", 5)
+    
+    # Open connection and create cursor.
+    try:
+        conn = sqlite3.connect(db_path)
+    except Exception as e:
+        print(f"TEST: An error occured while trying to connect to the database: {e}")
+        return
+    c = conn.cursor()
+    
+    # Test if top 10 result is still the same after training on cats and dogs.
+    expected_result = [(' with', ' ', 133), (' cats', ' ', 130), \
+        (' that', ' ', 123), (' of t', 'h', 120), (' dogs', ' ', 120), \
+        ('s and', ' ', 113), ('of th', 'e', 112), ('n the', ' ', 106), \
+        (' have', ' ', 103), ('f the', ' ', 98)]
+    test_result = c.execute(queries.select_markov_data_table_limit10)
+    assert expected_result == test_result.fetchall(), "TEST FAILED: " \
+        "Incorrect result after training on cats and dogs."
+    
+    # Close connection.
+    conn.close()
+    
+    # Delete test database.
+    os.remove(db_path)
+    
+    # Print success message if all tests passed.
+    print("TEST SUCCESS!")
+
 def main():
+    # Set database name.
+    db_name = "banana"
+    
     # Clean up wikipedia articles about cats and dogs.
     cleanup_wikipedia_data("res/wikipedia_cat.txt", "res/wikipedia_cat_clean.txt")
     cleanup_wikipedia_data("res/wikipedia_dog.txt", "res/wikipedia_dog_clean.txt")
     
     # Create new database, skips if the database already exists.
-    create_new_database("banana")
+    create_new_database(db_name)
     
     # Train database on datasets, skips if the database is already trained on 
     # these datasets.
-    train_database_on_dataset("banana", "res/wikipedia_cat_clean.txt", 5)
-    train_database_on_dataset("banana", "res/wikipedia_dog_clean.txt", 5)
+    train_database_on_dataset(db_name, "res/wikipedia_cat_clean.txt", 5)
+    train_database_on_dataset(db_name, "res/wikipedia_dog_clean.txt", 5)
     
     # Print 5 random sentences.
     for index, string in enumerate(["The d", "The c", "felin", "dogs ", "histo"]):
-        sentence = generate_sentence("banana", string, 250, 5)
+        sentence = generate_sentence(db_name, string, 250, 5)
         print(index, sentence)
 
 if __name__ == "__main__":
